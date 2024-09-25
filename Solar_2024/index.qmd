@@ -1,0 +1,445 @@
+---
+title: Houston Solar Panels 2024 version
+author: Alan Jackson
+date: '2024-09-15'
+format: html
+description: "A look at how residential solar has grown in Houston from 2014 to September 2024"
+image: "cover.png"
+categories:
+  - Mapping
+  - Houston
+execute:
+  freeze: auto  # re-render only when source changes
+  warning: false
+editor: source
+---
+
+```{r setup}
+#| warning: false
+#| message: false
+
+library(tidyverse)
+library(lubridate)
+library(stringr)
+library(tmap)
+
+googlecrs <- 4326
+
+path <- "/home/ajackson/Dropbox/Rprojects/Curated_Data_Files/Houston_Permits/"
+
+df <- readRDS(paste0(path, "Clean_Final_2022-9Sep2024.rds"))
+old <- readRDS(paste0(path, "Clean_Final_2017_to_Mar_2022.rds"))
+older <- readRDS(paste0(path, "Clean_Final_1989_2019.rds"))
+
+#   Combine the three files and extract solar, battery, and generator
+
+df2 <- rbind((older %>% select(Permit_date=Date, Zipcode, Lat, Lon, Comments,
+                               Address=Output)),
+             (old %>% select(Permit_date, Zipcode, Lat, Lon, Comments,
+                             Address=Cleaned_address)),
+             (df %>% select(Permit_date, Zipcode, Lat, Lon, Comments,
+                            Address=Cleaned_address))) %>% 
+  distinct() %>% 
+  filter(!duplicated(cbind(Comments, Address))) %>% 
+  mutate(Permit_date=as_date(Permit_date)) %>% 
+  ungroup()
+
+Outages <- tribble(~Event,    ~Date,         ~nudge,
+                   "Harvey",  "2017-Aug-27", 125,
+                   "Freeze",  "2021-Feb-14", 150,
+                   "Derecho", "2024-May-16", 175,
+                   "Beryl",   "2024-July-8", 200) %>% 
+  mutate(Date=lubridate::ymd(Date))
+
+
+```
+
+##        Create various datasets
+
+Having bought solar panels myself a few of years ago, and realizing
+that the city permit database could be used to find most installations,
+I decided that it would be interesting to look at the recent history and
+a few other facets of residential solar panel installations.
+
+The first step is to download the structural permit data as a CSV file
+from [the city open data
+site](https://www.houstontx.gov/planning/DevelopRegs/docs_pdfs/Permit_eReport/)
+and clean it up. Details may be found on my [github
+site](https://github.com/alankjackson/Curated_Data/blob/main/Clean_City_Permit_Addresses.Rmd),
+or in the [data](../../Datasets/Houston_Permits/) section of this site.
+The code for cleaning up the older data is in the file
+Clean_old_City_permits.Rmd on that same github site.
+
+## Grabbing the correct records
+
+As far as I can tell, Solar Panels are designated as such in the
+Description field, and nothing else. So a simple filter on "Solar"
+should suffice to capture all the installation permits. In more recent
+records, batteries are also flagged with tags like BATTERY, BATTERIES,
+LITHIUM, LI-ION, or POWERWALL. Additionally, since about 2017 but more
+consistently in recent years, the number of panels has been noted, so I
+can use that as a way to estimate added capacity.
+
+Generators use words like GENERATOR in the comments, and about half the time
+also say whether the fuel is diesel or natural gas. Sometimes the power rating
+is also given, in kilowatts. For some reason, residential generators do not seem
+to appear in the permit database, even though they are required to get a permit.
+That is a mystery.
+
+And there are 2 installations of solar roof tiles.
+
+```{r filter}
+#| warning: false
+#| message: false
+
+#   Filter for various items - Solar really didn't begin until 2014
+
+#   Solar panels
+Solar <- df2 %>% 
+  filter(Permit_date>"2013-12-31") %>% 
+  filter(str_detect(Comments, "SOLAR "))
+#   Gas and diesel generators, but exclude cell towers
+Generator <- df2 %>% 
+  filter(Permit_date>"2013-12-31") %>% 
+  filter(str_detect(Comments, "GAS GEN|GENERAT")) %>% 
+  filter(!str_detect(Comments, "CELL|TELECOM")) %>% 
+  ungroup()
+#   Try to decide if it is a residential or commercial generator
+#     Assume >  10 kW is commercial
+Generator <- Generator %>% 
+  mutate(KW=str_extract(Comments, "[\\d,]* ?E?KW ")) %>% 
+  mutate(KW=str_extract(KW, "[\\d,]+")) %>% 
+  mutate(KW=str_remove(KW, ",")) %>% 
+  mutate(KW=as.integer(KW)) %>% 
+  mutate(Fuel=case_when(
+    str_detect(Comments, "DIESEL") ~ "Diesel",
+    str_detect(Comments, "GAS") ~ "Gas",
+    .default = "UNK"
+    )
+  ) %>% 
+  mutate(Fuel=as_factor(Fuel))
+
+#   Car chargers
+Charger <- df2 %>% 
+  filter(Permit_date>"2013-12-31") %>% 
+  filter(str_detect(Comments, "CHARGING|CHARGER|CAR CHAR"))
+#   Batteries
+Battery <- df2 %>% 
+  filter(Permit_date>"2013-12-31") %>% 
+  filter(str_detect(Comments, "BATTER|LITHIUM|LI-ION|POWERWALL|ENERGY STOR"))
+
+```
+
+## Time series
+
+So let's look at the growth in stuff over time. We'll consolidate to
+monthly numbers to make the plot look descent.
+
+Looks like a reasonable linear fit for solar, commercial generators basically 
+flat.
+
+Hmmm.... for batteries looks like a big jump not long after Valentines Day of 
+2021. Why would that be?
+
+```{r}
+#| warning: false
+#| message: false
+
+#   Solar installations
+
+Solar %>% 
+  filter(Permit_date<ymd("2024-09-01")) %>%  #  don't want a fractional month
+  mutate(By_Month=floor_date(Permit_date, unit="month")) %>%
+  group_by(By_Month) %>%
+    summarise(MonthlyTotal=n()) %>%
+  ggplot(aes(x=By_Month, y=MonthlyTotal))+
+    geom_point()+
+    geom_smooth(method = lm) +
+    geom_vline(data=Outages, aes(xintercept=Date),
+               linetype="dashed") +
+    geom_text(data=Outages, aes(x=Date, y=nudge, label=Event)) +
+    labs(title="Residential Solar Panel Permits in Houston",
+         subtitle="Monthly totals", 
+         x="Year", 
+         y="Month Total")
+
+#   Battery installations
+
+Battery %>% 
+  filter(Permit_date<ymd("2024-09-01")) %>%  #  don't want a fractional month
+  mutate(By_Month=floor_date(Permit_date, unit="month")) %>%
+  group_by(By_Month) %>%
+    summarise(MonthlyTotal=n()) %>%
+  ggplot(aes(x=By_Month, y=MonthlyTotal))+
+    geom_point()+
+    geom_smooth(method = lm) +
+    geom_vline(data=Outages, aes(xintercept=Date),
+               linetype="dashed") +
+    geom_text(data=Outages, aes(x=Date, y=nudge/7, label=Event)) +
+    labs(title="Residential Battery Permits in Houston",
+         subtitle="Monthly totals", 
+         x="Year", 
+         y="Month Total")
+
+#   Generator installations
+
+Generator %>% 
+  filter(Permit_date<ymd("2024-09-01")) %>%  #  don't want a fractional month
+  mutate(By_Month=floor_date(Permit_date, unit="month")) %>%
+  group_by(By_Month) %>%
+    summarise(MonthlyTotal=n()) %>%
+  ggplot(aes(x=By_Month, y=MonthlyTotal))+
+    geom_point()+
+    geom_smooth(method = lm) +
+    geom_vline(data=Outages, aes(xintercept=Date),
+               linetype="dashed") +
+    geom_text(data=Outages, aes(x=Date, y=nudge/7, label=Event)) +
+    labs(title="Commercial Generator Permits in Houston",
+         subtitle="Monthly totals", 
+         x="Year", 
+         y="Month Total")
+
+#   Generator installations by fuel type
+
+Generator %>% 
+  filter(Permit_date<ymd("2024-09-01")) %>%  #  don't want a fractional month
+  mutate(By_Month=floor_date(Permit_date, unit="month")) %>%
+  group_by(By_Month, Fuel) %>%
+    summarise(MonthlyTotal=n()) %>%
+  ggplot(aes(x=By_Month, y=MonthlyTotal)) +
+    geom_point() +
+    facet_grid(rows = vars(Fuel)) +
+    labs(title="Commercial Generator Permits in Houston, by Fuel Type",
+         subtitle="Monthly totals", 
+         x="Year", 
+         y="Month Total")
+
+#   Generator kW ratings
+
+Generator %>% 
+  filter(!is.na(KW)) %>% 
+  ggplot(aes(x=KW)) +
+    geom_histogram() +
+    labs(title="Commercial Generator Installations, Kilowatt sizes")
+
+```
+
+
+## Look at amount of power capacity
+
+We will use the number of panels (where noted) to get an idea of how
+much kW capacity is being added. While capacity per panel varies, 300 watts
+is not a bad average number.
+
+```{r}
+#| warning: false
+#| message: false
+
+panels <- Solar %>% 
+  mutate(Num_panels=
+           as.numeric(
+             str_extract(
+               str_extract(Comments, "\\(\\d+\\)"),"\\d+"))) %>% 
+  filter(str_detect(Comments, "RESID"),
+         Num_panels<100,
+         Num_panels>0)
+
+panels %>% 
+  ggplot()+
+  geom_histogram(aes(x=Num_panels))
+
+#   About 300 watts per panel
+
+panels %>% 
+  filter(Permit_date>ymd("2020-1-1")) %>% 
+  mutate(Watts=300*Num_panels/1000)  %>% 
+  mutate(By_Month=floor_date(Permit_date, unit="month")) %>%
+  group_by(By_Month) %>%
+    summarise(MonthlyTotal=sum(Watts)) %>%
+  ggplot(aes(x=By_Month, y=MonthlyTotal))+
+    geom_point()+
+    geom_smooth() +
+    labs(title="Monthly Residential Solar Panel Kilowatts in Houston",
+         subtitle="For installations where the number of panels was noted", 
+         x="Year", 
+         y="Month Total")
+
+#   Assume average 30 panels per install, at 300 watts per, so 9 kwatts per
+
+Solar %>% 
+  filter(year(Permit_date)>2020) %>% 
+  mutate(By_Month=floor_date(Permit_date, unit="month")) %>%
+  group_by(By_Month) %>%
+    summarise(MonthlyTotal=n()) %>%
+  mutate(Kwatts=MonthlyTotal*9) %>% 
+  ggplot(aes(x=By_Month, y=Kwatts))+
+    geom_point()+
+    geom_smooth() +
+    labs(title="Residential Solar Panel Total Estimated kW added in Houston",
+         subtitle="Assuming 9 kW per install on average", 
+         x="Year", 
+         y="Month Total")
+
+```
+
+## Let's look at the distribution by Zip code
+
+Surprisingly the Houston Arrow does not appear on this map. That is a
+bit of a surprise. Note that 77048 is dominated by a property of
+apartment homes that were built with a large solar array.
+
+```{r by zip code}
+#| warning: false
+#| message: false
+
+#   Top 20 zipcodes
+
+Solar %>% 
+  group_by(Zipcode) %>% 
+  summarise(n = n()) %>% 
+  dplyr::arrange(desc(n)) %>%
+  dplyr::slice(1:20) %>% 
+  gt::gt() %>% 
+  gt::tab_header(
+    title = "Solar Panel Installations by Zip Code",
+    subtitle = "2014 - present"
+  ) %>% 
+  gt::cols_label(
+    Zipcode = "Zip Code",
+    n = "Number of Installations"
+  )
+
+#    now let's make a map
+
+zippath="/home/ajackson/Dropbox/Rprojects/Curated_Data_Files/Zipcodes/"
+zips <- readRDS(paste0(zippath, "COH_Zip_Polys.rds")) %>% 
+  mutate(Zipcode=as.character(ZIP_CODE)) %>% 
+  sf::st_as_sf()
+
+
+#   Number of permits per zip
+
+solar_zip <- Solar %>% 
+  group_by(Zipcode) %>% 
+    summarise(Num = n()) %>% 
+  mutate(Label=paste(as.character(Num) , "permits", Zipcode)) %>%
+  mutate(Num=cut_width(Num, 50))
+
+solar_zip <- right_join(zips, solar_zip, by="Zipcode")
+
+# Create a factored palette function
+pal <- leaflet::colorFactor(
+  palette = "Blues",
+  domain = solar_zip$Num)
+
+leaflet::leaflet(solar_zip) %>% 
+  leaflet::setView(lng = -95.362306, lat = 29.756931, zoom = 12) %>% 
+  leaflet::addTiles() %>%
+  leaflet::addPolygons(weight=1,
+              fillColor = ~pal((Num)),
+              fillOpacity = 0.5,
+              label = ~Label) %>% 
+  leaflet::addLegend("bottomleft", pal = pal, values = ~Num,
+    title = "Num Permits",
+    opacity = 1
+  )
+
+```
+
+## Let's combine solar panels with assessments
+
+Interestingly, it is clear that solar panels are not just for the
+wealthy. The median value of homes with panels is pretty close to the
+median value of homes in general. I used the 2021 HCAD total market
+value for the value for each home.
+
+There are some differences however. It appears that it roughly twice as
+likely that a house worth over \$1,000,000 will have solar panels than a
+house worth less than that.
+
+```{r HCAD}
+#| warning: false
+#| message: false
+
+HCADpath="/home/ajackson/Dropbox/Rprojects/Curated_Data_Files/HCAD/"
+HCAD <- readRDS(paste0(HCADpath, "Values_2021.rds")) %>% 
+  rename(Address=site_addr_1)
+
+foo <- inner_join(Solar, HCAD, by="Address") %>% 
+  mutate(Value=as.numeric(tot_mkt_val)) %>% 
+  filter(!stringr::str_detect(state_class, "X")) %>% 
+  select(Address, Zipcode, Permit_date, Comments, new_own_dt, Value, state_class)
+
+foo %>% 
+  filter(Value<2000000) %>% 
+  ggplot(aes(x=Value)) +
+  geom_histogram(bins=32)+
+  scale_x_continuous(labels=scales::dollar_format()) +
+  labs(title="Property Market Value",
+       subtitle="For Properties with Solar Panels",
+       x="Market Value",
+       y="Number of Properties")
+
+HCAD %>% 
+  mutate(Value=as.numeric(tot_mkt_val)) %>% 
+  filter(!stringr::str_detect(state_class, "X")) %>% 
+  filter(Value<2000000) %>% 
+  ggplot(aes(x=Value)) +
+  geom_histogram(bins=32)+
+  scale_x_continuous(labels=scales::dollar_format()) +
+  labs(title="Property Market Value",
+       subtitle="For All Properties",
+       x="Market Value",
+       y="Number of Properties")
+
+
+foo2 <- HCAD %>%
+  mutate(Value=as.numeric(tot_mkt_val)) %>%
+  filter(!stringr::str_detect(state_class, "X")) %>%
+  filter(Value<2000000) %>%
+  mutate(Bins=cut_width(Value, 100000)) %>%
+  group_by(Bins) %>%
+    summarize(n=n())
+
+foo %>% 
+  filter(Value<2000000) %>% 
+  mutate(Bins=cut_width(Value, 100000)) %>% 
+  group_by(Bins) %>% 
+    summarize(nsolar=n()) %>% 
+  left_join(., foo2, by="Bins") %>% 
+  mutate(Pct=nsolar/n) %>%
+  cbind(., seq(0000, 2050000, 100000)) %>% 
+  rename(Value=5) %>% 
+  ggplot(aes(x=Value, y=Pct)) +
+  geom_histogram(bins=20, stat="identity")+
+  scale_x_continuous(labels=scales::dollar_format()) +
+  scale_y_continuous(labels=scales::percent) +
+  labs(title="Property Market Value",
+       subtitle="For All Properties",
+       x="Market Value",
+       y="Percent of Properties")
+  
+```
+
+## Car charging
+
+One final somewhat related topic - electric car chargers. These are all
+commercial, I don't think residential chargers (220 volt) require a
+permit. Looks like construction of chargoing stations is beginning to take off.
+
+```{r chargers}
+#| warning: false
+#| message: false
+
+Charger %>% 
+  mutate(By_Month=floor_date(Permit_date, unit="month")) %>%
+  group_by(By_Month) %>%
+    summarise(MonthlyTotal=n()) %>%
+  ggplot(aes(x=By_Month, y=MonthlyTotal))+
+    geom_point()+
+    labs(title="Electric Car Charger Permits in Houston",
+         subtitle="Monthly totals", 
+         x="Year", 
+         y="Month Total")
+
+```
